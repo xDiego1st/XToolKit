@@ -22,6 +22,7 @@ import argparse, base64, hashlib, hmac, json, os, re, struct, subprocess, sys, t
 import shlex
 from pathlib import Path
 import tempfile
+from typing import Any, Literal, overload
 
 # Standalone launches may use a Windows legacy console code page that cannot
 # encode status symbols. Preserve the console's encoding, but escape unsupported
@@ -56,7 +57,7 @@ def wait_human(msg: str, timeout: int = 600) -> bool:
                 received.set()
             else:
                 closed.set()
-        except (OSError, ValueError, UnicodeError):
+        except (OSError, ValueError):
             closed.set()
 
     print(f"\n⏸  Action required: {msg}", flush=True)
@@ -134,12 +135,17 @@ def find_adb() -> str:
     sys.exit("❌ ADB not found. Install Android SDK platform-tools and add adb to PATH.")
 
 
-ADB = None
-SERIAL = None
+ADB: str | None = None
+SERIAL: str | None = None
 
 
-def sh(*args, timeout=60, check=False, binary=False):
-    cmd = [ADB] + (["-s", SERIAL] if SERIAL else []) + list(args)
+@overload
+def sh(*args: object, timeout: float = 60, check: bool = False, binary: Literal[False] = False) -> str: ...
+@overload
+def sh(*args: object, timeout: float = 60, check: bool = False, binary: Literal[True]) -> bytes: ...
+def sh(*args: object, timeout: float = 60, check: bool = False, binary: bool = False) -> str | bytes:
+    adb_bin = ADB or "adb"
+    cmd = [adb_bin] + (["-s", SERIAL] if SERIAL else []) + [str(a) for a in args]
     p = subprocess.run(cmd, capture_output=True, timeout=timeout)
     if check and p.returncode != 0:
         raise RuntimeError(p.stderr.decode("utf-8", "ignore")[:300])
@@ -542,8 +548,9 @@ def add_account(email, password, totp_secret="") -> bool:
             warn("Could not enter the complete email after several attempts")
         tap_text("\u4e0b\u4e00\u6b65", "Next"); time.sleep(6)
 
-    if find_edit():
-        tap(*find_edit()); time.sleep(1)
+    pw_pos = find_edit()
+    if pw_pos:
+        tap(*pw_pos); time.sleep(1)
         type_text(password); time.sleep(1)
         tap_text("\u4e0b\u4e00\u6b65", "Next"); time.sleep(7)
 
@@ -567,10 +574,11 @@ def add_account(email, password, totp_secret="") -> bool:
             return False
 
         if ("\u4e24\u6b65\u9a8c\u8bc1" in text or "2-Step" in text or "\u8f93\u5165\u9a8c\u8bc1\u7801" in text):
-            if totp_secret and find_edit():
+            code_pos = find_edit() if totp_secret else None
+            if code_pos:
                 code = totp(totp_secret)
                 note("Submitting the two-factor code without printing it")
-                tap(*find_edit()); type_text(code); time.sleep(1)
+                tap(*code_pos); type_text(code); time.sleep(1)
                 tap_text("\u4e0b\u4e00\u6b65", "Next"); time.sleep(8)
                 continue
             if not wait_human("Two-step verification required; complete the check on Android.", 300):
@@ -847,12 +855,12 @@ def get_target_frida_device(pid: int, serial: str):
     return selected
 
 
-def run_trial(pid: int, wait=90, plan="auto", list_only=False, stack=False, old_token="", stack_mode=None, activity_method="auto", post_launch=None, open_only=False) -> dict:
+def run_trial(pid: int, wait=90, plan="auto", list_only=False, stack=False, old_token="", stack_mode=None, activity_method="auto", post_launch=None, open_only=False) -> dict[str, Any]:
     step("Injecting billing module to inspect introductory offers")
-    dev = get_target_frida_device(pid, SERIAL)
+    dev = get_target_frida_device(pid, SERIAL or "")
     note(f"Using Frida device: {dev.id} (ADB: {SERIAL})")
     sess = dev.attach(pid)
-    res = {"offers": [], "launched": None, "purchase": None, "activity": None, "errors": []}
+    res: dict[str, Any] = {"offers": [], "launched": None, "purchase": None, "activity": None, "errors": []}
     launched_event = threading.Event()
 
     def on_msg(m, _):
@@ -982,17 +990,17 @@ def handle_verify(password="") -> bool:
             es = [n for n in nodes(ui_xml()) if "EditText" in n["cls"]]
             if es:
                 tap(es[0]["x"], es[0]["y"]); time.sleep(0.8)
-                slow_type(password, 0.1); time.sleep(0.8)
+                type_text(password); time.sleep(0.8)
                 tap_text("\u9a8c\u8bc1", "Verify"); time.sleep(6); changed = True; continue
         break
     return changed
 
 
-def assess_checkout_terms(text: str, expected_plan: str = "auto") -> dict:
+def assess_checkout_terms(text: str, expected_plan: str = "auto") -> dict[str, Any]:
     """Do not mistake a renewal price for the amount due today."""
     clean = " ".join(text.split())
     low = clean.lower()
-    result = {"reason": "checkout_not_visible", "today_price": None, "text": clean[:400]}
+    result: dict[str, Any] = {"reason": "checkout_not_visible", "today_price": None, "text": clean[:400]}
     # A payment security refusal overrides any $0/trial wording that may
     # still be visible in the background behind Google's error dialog.
     if "or-reh-04" in low or (
@@ -1235,7 +1243,8 @@ def process(email, password="", totp_secret="", add=True, card=None, plan="auto"
         callback = fr.get("purchase")
         if isinstance(callback, dict):
             try:
-                purchase_code = int(callback.get("code"))
+                raw_code = callback.get("code")
+                purchase_code = int(raw_code) if raw_code is not None else None
             except (TypeError, ValueError):
                 purchase_code = None
             if purchase_code not in (None, 0):
